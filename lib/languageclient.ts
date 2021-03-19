@@ -315,6 +315,16 @@ export class LanguageClientConnection extends EventEmitter {
   }
 
   /**
+   * Public: Send a `textDocument/moniker` request.
+   *
+   * @param params The {MonikerParams} containing information about the position in the document.
+   * @param cancellationToken The {CancellationToken} that is used to cancel this request if necessary.
+   */
+  public moniker(params: lsp.MonikerParams, cancellationToken?: jsonrpc.CancellationToken): Promise<lsp.Moniker[]> {
+    return this._sendRequest("textDocument/moniker", params, cancellationToken)
+  }
+
+  /**
    * Public: Send a `completionItem/resolve` request.
    *
    * @param params The {CompletionItem} for which a fully resolved {CompletionItem} is desired.
@@ -409,11 +419,21 @@ export class LanguageClientConnection extends EventEmitter {
    * Public: Send a `textDocument/codeAction` request.
    *
    * @param params The {CodeActionParams} identifying the document, range and context for the code action.
-   * @returns A {Promise} containing an {Array} of {Commands}s that can be performed against the given
-   *   documents range.
+   * @returns A {Promise} containing an {Array} of {Command}s or {CodeAction}s that can be performed
+   *   against the given documents range.
    */
   public codeAction(params: lsp.CodeActionParams): Promise<Array<lsp.Command | lsp.CodeAction>> {
     return this._sendRequest("textDocument/codeAction", params)
+  }
+
+  /**
+   * Public: Send a `codeAction/resolve` request.
+   *
+   * @param params The {CodeAction} whose properties (e.g. `edit`) are to be resolved.
+   * @returns A resolved {CodeAction} that can be applied immediately.
+   */
+  public codeActionResolve(params: lsp.CodeAction): Promise<lsp.CodeAction> {
+    return this._sendRequest("codeAction/resolve", params)
   }
 
   /**
