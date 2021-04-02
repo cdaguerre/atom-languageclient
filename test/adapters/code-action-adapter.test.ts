@@ -3,7 +3,8 @@ import { expect } from "chai"
 import * as sinon from "sinon"
 import * as ls from "../../lib/languageclient"
 import CodeActionAdapter from "../../lib/adapters/code-action-adapter"
-import LinterPushV2Adapter from "../../lib/adapters/linter-push-v2-adapter"
+/* eslint-disable import/no-deprecated */
+import IdeDiagnosticAdapter from "../../lib/adapters/diagnostic-adapter"
 import { createSpyConnection, createFakeEditor } from "../helpers.js"
 
 describe("CodeActionAdapter", () => {
@@ -22,7 +23,7 @@ describe("CodeActionAdapter", () => {
   })
 
   describe("getCodeActions", () => {
-    it("fetches code actions from the connection", async () => {
+    it("fetches code actions from the connection when IdeDiagnosticAdapter is used", async () => {
       const connection = createSpyConnection()
       const languageClient = new ls.LanguageClientConnection(connection)
       const testCommand: ls.Command = {
@@ -33,7 +34,9 @@ describe("CodeActionAdapter", () => {
       sinon.stub(languageClient, "codeAction").returns(Promise.resolve([testCommand]))
       sinon.spy(languageClient, "executeCommand")
 
-      const linterAdapter = new LinterPushV2Adapter(languageClient)
+      const linterAdapter = new IdeDiagnosticAdapter(languageClient)
+      // eslint-disable-next-line @typescript-eslint/ban-ts-comment
+      // @ts-ignore private method
       sinon.stub(linterAdapter, "getDiagnosticCode").returns("test code")
 
       const testPath = "/test.txt"
