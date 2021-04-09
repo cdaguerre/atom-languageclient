@@ -219,4 +219,15 @@ export default class Convert {
       newText: textEdit.newText,
     }
   }
+
+  // /**
+  //  * Public: Convert a language server protocol {ls.TextDocumentEdit} object to the
+  //  * an {Array} of {atomIde.TextEdit} objects.
+  //  *
+  //  * @param textEdits The language server protocol {ls.TextDocumentEdit} objects to convert.
+  //  * @returns An {Array} of Atom {atomIde.TextEdit} objects.
+  //  */
+  // public static convertLsTextDocumentEdit(textDocumentEdit: ls.TextDocumentEdit): atomIde.TextEdit[] {
+  //   return (textDocumentEdit.edits || []).map(Convert.convertLsTextEdit)
+  // }
 }

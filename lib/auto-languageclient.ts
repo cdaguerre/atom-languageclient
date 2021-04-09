@@ -21,6 +21,7 @@ import LoggingConsoleAdapter from "./adapters/logging-console-adapter"
 import NotificationsAdapter from "./adapters/notifications-adapter"
 import OutlineViewAdapter from "./adapters/outline-view-adapter"
 import RenameAdapter from "./adapters/rename-adapter"
+import RenameView from "./views/rename-view"
 import SignatureHelpAdapter from "./adapters/signature-help-adapter"
 import * as ShowDocumentAdapter from "./adapters/show-document-adapter"
 import * as Utils from "./utils"
@@ -129,6 +130,7 @@ export default class AutoLanguageClient {
           applyEdit: true,
           configuration: false,
           workspaceEdit: {
+            resourceOperations: ["create", "delete", "rename"],
             documentChanges: true,
             normalizesLineEndings: false,
             changeAnnotationSupport: undefined,
@@ -234,6 +236,7 @@ export default class AutoLanguageClient {
             dynamicRegistration: false,
           },
           rename: {
+            prepareSupport: true,
             dynamicRegistration: false,
           },
           moniker: {
@@ -278,7 +281,10 @@ export default class AutoLanguageClient {
   protected preInitialization(_connection: LanguageClientConnection): void {}
 
   /** (Optional) Late wire-up of listeners after initialize method has been sent */
-  protected postInitialization(_server: ActiveServer): void {}
+  protected postInitialization(_server: ActiveServer): void {
+    // console.log(_server.capabilities)
+    this.initializeRename(_server.connection)
+  }
 
   /** (Optional) Determine whether to use ipc, stdio or socket to connect to the server */
   protected getConnectionType(): ConnectionType {
@@ -1031,6 +1037,10 @@ export default class AutoLanguageClient {
       priority: 1,
       rename: this.getRename.bind(this),
     }
+  }
+
+  protected initializeRename(connection: LanguageClientConnection) {
+    new RenameView(connection)
   }
 
   protected async getRename(
