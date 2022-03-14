@@ -8,6 +8,7 @@ import * as linter from "atom/linter"
 import Convert from "./convert.js"
 import ApplyEditAdapter from "./adapters/apply-edit-adapter"
 import AutocompleteAdapter, { grammarScopeToAutoCompleteSelector } from "./adapters/autocomplete-adapter"
+import * as CallHierarchyAdapter from "./adapters/call-hierarchy-adapter"
 import CodeActionAdapter from "./adapters/code-action-adapter"
 import CodeFormatAdapter from "./adapters/code-format-adapter"
 import CodeHighlightAdapter from "./adapters/code-highlight-adapter"
@@ -26,9 +27,16 @@ import * as Utils from "./utils"
 import { Socket } from "net"
 import { LanguageClientConnection } from "./languageclient"
 import { ConsoleLogger, FilteredLogger, Logger } from "./logger"
-import { LanguageServerProcess, ServerManager, ActiveServer } from "./server-manager.js"
+import {
+  LanguageServerProcess,
+  ServerManager,
+  ActiveServer,
+  normalizePath,
+  considerAdditionalPath,
+} from "./server-manager.js"
 import { Disposable, CompositeDisposable, Point, Range, TextEditor } from "atom"
 import * as ac from "atom/autocomplete-plus"
+import { basename } from "path"
 
 export { ActiveServer, LanguageClientConnection, LanguageServerProcess }
 export type ConnectionType = "stdio" | "socket" | "ipc"
@@ -40,9 +48,9 @@ export interface ServerAdapters {
 }
 
 /**
- * Public: AutoLanguageClient provides a simple way to have all the supported
- * Atom-IDE services wired up entirely for you by just subclassing it and
- * implementing at least
+ * Public: AutoLanguageClient provides a simple way to have all the supported Atom-IDE services wired up entirely for
+ * you by just subclassing it and implementing at least
+ *
  * - `startServerProcess`
  * - `getGrammarScopes`
  * - `getLanguageName`
@@ -68,6 +76,7 @@ export default class AutoLanguageClient {
 
   // Shared adapters that can take the RPC connection as required
   protected autoComplete?: AutocompleteAdapter
+  protected callHierarchy?: typeof CallHierarchyAdapter
   protected datatip?: DatatipAdapter
   protected definitions?: DefinitionAdapter
   protected findReferences?: FindReferencesAdapter
@@ -106,12 +115,13 @@ export default class AutoLanguageClient {
 
   /** (Optional) Return the parameters used to initialize a client - you may want to extend capabilities */
   protected getInitializeParams(projectPath: string, lsProcess: LanguageServerProcess): ls.InitializeParams {
+    const rootUri = Convert.pathToUri(projectPath)
     return {
-      processId: lsProcess.pid,
+      processId: lsProcess.pid !== undefined ? lsProcess.pid : null,
       rootPath: projectPath,
-      rootUri: Convert.pathToUri(projectPath),
+      rootUri,
       locale: atom.config.get("atom-i18n.locale") || "en",
-      workspaceFolders: null,
+      workspaceFolders: [{ uri: rootUri, name: basename(projectPath) }],
       // The capabilities supported.
       // TODO the capabilities set to false/undefined are TODO. See {ls.ServerCapabilities} for a full list.
       capabilities: {
@@ -122,8 +132,9 @@ export default class AutoLanguageClient {
             documentChanges: true,
             normalizesLineEndings: false,
             changeAnnotationSupport: undefined,
+            resourceOperations: ["create", "rename", "delete"],
           },
-          workspaceFolders: false,
+          workspaceFolders: true,
           didChangeConfiguration: {
             dynamicRegistration: false,
           },
@@ -210,6 +221,11 @@ export default class AutoLanguageClient {
           },
           codeAction: {
             dynamicRegistration: false,
+            codeActionLiteralSupport: {
+              codeActionKind: {
+                valueSet: [""], // TODO explicitly support more?
+              },
+            },
           },
           codeLens: {
             dynamicRegistration: false,
@@ -233,13 +249,15 @@ export default class AutoLanguageClient {
             codeDescriptionSupport: true,
             dataSupport: true,
           },
+          callHierarchy: {
+            dynamicRegistration: false,
+          },
           implementation: undefined,
           typeDefinition: undefined,
           colorProvider: undefined,
           foldingRange: undefined,
           selectionRange: undefined,
           linkedEditingRange: undefined,
-          callHierarchy: undefined,
           semanticTokens: undefined,
         },
         general: {
@@ -277,6 +295,28 @@ export default class AutoLanguageClient {
     return configuration
   }
 
+  /**
+   * (Optional) Determines the `languageId` string used for `textDocument/didOpen` notification. The default is to use
+   * the grammar name.
+   *
+   * You can override this like this:
+   *
+   *     class MyLanguageClient extends AutoLanguageClient {
+   *       getLanguageIdFromEditor(editor: TextEditor) {
+   *         if (editor.getGrammar().scopeName === "source.myLanguage") {
+   *           return "myCustumLanguageId"
+   *         }
+   *         return super.getLanguageIdFromEditor(editor)
+   *       }
+   *     }
+   *
+   * @param editor A {TextEditor} which is opened.
+   * @returns A {string} of `languageId` used for `textDocument/didOpen` notification.
+   */
+  protected getLanguageIdFromEditor(editor: TextEditor): string {
+    return editor.getGrammar().name
+  }
+
   // Helper methods that are useful for implementors
   // ---------------------------------------------------------------------------
 
@@ -305,7 +345,9 @@ export default class AutoLanguageClient {
       (e) => this.shouldStartForEditor(e),
       (filepath) => this.filterChangeWatchedFiles(filepath),
       this.reportBusyWhile,
-      this.getServerName()
+      this.getServerName(),
+      (textEditor: TextEditor) => this.determineProjectPath(textEditor),
+      this.shutdownGracefully
     )
     this._serverManager.startListening()
     process.on("exit", () => this.exitCleanup.bind(this))
@@ -324,16 +366,16 @@ export default class AutoLanguageClient {
   }
 
   /**
-   * Spawn a general language server.
-   * Use this inside the `startServerProcess` override if the language server is a general executable.
-   * Also see the `spawnChildNode` method.
-   * If the name is provided as the first argument, it checks `bin/platform-arch/exeName` by default, and if doesn't exists uses the exe on PATH.
-   * For example on Windows x64, by passing `serve-d`, `bin/win32-x64/exeName.exe` is spawned by default.
-   * @param exe the `name` or `path` of the executable
-   * @param args args passed to spawn the exe. Defaults to `[]`.
-   * @param options: child process spawn options. Defaults to `{}`.
-   * @param rootPath the path of the folder of the exe file. Defaults to `join("bin", `${process.platform}-${process.arch}`)`.
-   * @param exeExtention the extention of the exe file. Defaults to `process.platform === "win32" ? ".exe" : ""`
+   * Spawn a general language server. Use this inside the `startServerProcess` override if the language server is a
+   * general executable. Also see the `spawnChildNode` method. If the name is provided as the first argument, it checks
+   * `bin/platform-arch/exeName` by default, and if doesn't exists uses the exe on PATH. For example on Windows x64, by
+   * passing `serve-d`, `bin/win32-x64/exeName.exe` is spawned by default.
+   *
+   * @param exe The `name` or `path` of the executable
+   * @param args Args passed to spawn the exe. Defaults to `[]`.
+   * @param options: Child process spawn options. Defaults to `{}`.
+   * @param rootPath The path of the folder of the exe file. Defaults to `join("bin", `${process.platform}-${process.arch} `)`.
+   * @param exeExtention The extention of the exe file. Defaults to `process.platform === "win32" ? ".exe" : ""`
    */
   protected spawn(
     exe: string,
@@ -346,9 +388,9 @@ export default class AutoLanguageClient {
     return cp.spawn(Utils.getExePath(exe, rootPath, exeExtention), args, options)
   }
 
-  /** Spawn a language server using Atom's Nodejs process
-   *  Use this inside the `startServerProcess` override if the language server is a JavaScript file.
-   *  Also see the `spawn` method
+  /**
+   * Spawn a language server using Atom's Nodejs process Use this inside the `startServerProcess` override if the
+   * language server is a JavaScript file. Also see the `spawn` method
    */
   protected spawnChildNode(args: string[], options: cp.SpawnOptions = {}): LanguageServerProcess {
     this.logger.debug(`starting child Node "${args.join(" ")}"`)
@@ -387,6 +429,7 @@ export default class AutoLanguageClient {
       connection,
       capabilities: initializeResponse.capabilities,
       disposable: new CompositeDisposable(),
+      additionalPaths: new Set<string>(),
     }
     this.postInitialization(newServer)
     connection.initialized()
@@ -432,8 +475,9 @@ export default class AutoLanguageClient {
     lsProcess.stderr?.on("data", (chunk: Buffer) => this.onSpawnStdErrData(chunk, projectPath))
   }
 
-  /** The function called whenever the spawned server `error`s.
-   *  Extend (call super.onSpawnError) or override this if you need custom error handling
+  /**
+   * The function called whenever the spawned server `error`s. Extend (call super.onSpawnError) or override this if you
+   * need custom error handling
    */
   protected onSpawnError(err: Error): void {
     atom.notifications.addError(
@@ -445,8 +489,9 @@ export default class AutoLanguageClient {
     )
   }
 
-  /** The function called whenever the spawned server `close`s.
-   *  Extend (call super.onSpawnClose) or override this if you need custom close handling
+  /**
+   * The function called whenever the spawned server `close`s. Extend (call super.onSpawnClose) or override this if you
+   * need custom close handling
    */
   protected onSpawnClose(code: number | null, signal: NodeJS.Signals | null): void {
     if (code !== 0 && signal === null) {
@@ -456,22 +501,46 @@ export default class AutoLanguageClient {
     }
   }
 
-  /** The function called whenever the spawned server `disconnect`s.
-   *  Extend (call super.onSpawnDisconnect) or override this if you need custom disconnect handling
+  /**
+   * The function called whenever the spawned server `disconnect`s. Extend (call super.onSpawnDisconnect) or override
+   * this if you need custom disconnect handling
    */
   protected onSpawnDisconnect(): void {
     this.logger.debug(`${this.getServerName()} language server for ${this.getLanguageName()} got disconnected.`)
   }
 
-  /** The function called whenever the spawned server `exit`s.
-   *  Extend (call super.onSpawnExit) or override this if you need custom exit handling
+  /**
+   * The function called whenever the spawned server `exit`s. Extend (call super.onSpawnExit) or override this if you
+   * need custom exit handling
    */
   protected onSpawnExit(code: number | null, signal: NodeJS.Signals | null): void {
     this.logger.debug(`exit: code ${code} signal ${signal}`)
   }
 
-  /** The function called whenever the spawned server returns `data` in `stderr`
-   *  Extend (call super.onSpawnStdErrData) or override this if you need custom stderr data handling
+  /** (Optional) Finds the project path. If there is a custom logic for finding projects override this method. */
+  protected determineProjectPath(textEditor: TextEditor): string | null {
+    const filePath = textEditor.getPath()
+    // TODO can filePath be null
+    if (filePath === null || filePath === undefined) {
+      return null
+    }
+    const projectPath = this._serverManager.getNormalizedProjectPaths().find((d) => filePath.startsWith(d))
+    if (projectPath !== undefined) {
+      return projectPath
+    }
+
+    const serverWithClaim = this._serverManager
+      .getActiveServers()
+      .find((server) => server.additionalPaths?.has(path.dirname(filePath)))
+    if (serverWithClaim !== undefined) {
+      return normalizePath(serverWithClaim.projectPath)
+    }
+    return null
+  }
+
+  /**
+   * The function called whenever the spawned server returns `data` in `stderr` Extend (call super.onSpawnStdErrData) or
+   * override this if you need custom stderr data handling
    */
   protected onSpawnStdErrData(chunk: Buffer, projectPath: string): void {
     const errorString = chunk.toString()
@@ -529,7 +598,8 @@ export default class AutoLanguageClient {
         server.connection,
         (editor) => this.shouldSyncForEditor(editor, server.projectPath),
         server.capabilities.textDocumentSync,
-        this.reportBusyWhile
+        this.reportBusyWhile,
+        (editor) => this.getLanguageIdFromEditor(editor)
       )
       server.disposable.add(docSyncAdapter)
     }
@@ -562,6 +632,8 @@ export default class AutoLanguageClient {
     })
 
     ShowDocumentAdapter.attach(server.connection)
+
+    server.connection.onWorkspaceFolders(() => this._serverManager.getWorkspaceFolders())
   }
 
   public shouldSyncForEditor(editor: TextEditor, projectPath: string): boolean {
@@ -578,7 +650,8 @@ export default class AutoLanguageClient {
    * A method to override to return an array of grammar scopes that should not be used for autocompletion.
    *
    * Usually that's used for disabling autocomplete inside comments,
-   * @example if the grammar scopes are [ '.source.js' ], `getAutocompleteDisabledScopes` may return [ '.source.js .comment' ].
+   *
+   * @example If the grammar scopes are [ '.source.js' ], `getAutocompleteDisabledScopes` may return [ '.source.js .comment' ].
    */
   protected getAutocompleteDisabledScopes(): Array<string> {
     return []
@@ -597,7 +670,10 @@ export default class AutoLanguageClient {
       excludeLowerPriority: false,
       filterSuggestions: true,
       getSuggestions: this.getSuggestions.bind(this),
-      onDidInsertSuggestion: this.onDidInsertSuggestion.bind(this),
+      onDidInsertSuggestion: (event) => {
+        AutocompleteAdapter.applyAdditionalTextEdits(event)
+        this.onDidInsertSuggestion(event)
+      },
       getSuggestionDetailsOnSelect: this.getSuggestionDetailsOnSelect.bind(this),
     }
   }
@@ -657,7 +733,23 @@ export default class AutoLanguageClient {
     }
 
     this.definitions = this.definitions || new DefinitionAdapter()
-    return this.definitions.getDefinition(server.connection, server.capabilities, this.getLanguageName(), editor, point)
+    const query = await this.definitions.getDefinition(
+      server.connection,
+      server.capabilities,
+      this.getLanguageName(),
+      editor,
+      point
+    )
+
+    if (query !== null && server.additionalPaths !== undefined) {
+      // populate additionalPaths based on definitions
+      // Indicates that the language server can support LSP functionality for out of project files indicated by `textDocument/definition` responses.
+      for (const def of query.definitions) {
+        considerAdditionalPath(server as ActiveServer & { additionalPaths: Set<string> }, path.dirname(def.path))
+      }
+    }
+
+    return query
   }
 
   // Outline View via LS documentSymbol---------------------------------
@@ -678,6 +770,41 @@ export default class AutoLanguageClient {
 
     this.outlineView = this.outlineView || new OutlineViewAdapter()
     return this.outlineView.getOutline(server.connection, editor)
+  }
+
+  // Call Hierarchy View via LS callHierarchy---------------------------------
+  public provideCallHierarchy(): atomIde.CallHierarchyProvider {
+    return {
+      name: this.name,
+      grammarScopes: this.getGrammarScopes(),
+      priority: 1,
+      getIncomingCallHierarchy: this.getIncomingCallHierarchy.bind(this),
+      getOutgoingCallHierarchy: this.getOutgoingCallHierarchy.bind(this),
+    }
+  }
+
+  protected async getIncomingCallHierarchy(
+    editor: TextEditor,
+    point: Point
+  ): Promise<atomIde.CallHierarchy<"incoming"> | null> {
+    const server = await this._serverManager.getServer(editor)
+    if (server === null || !CallHierarchyAdapter.canAdapt(server.capabilities)) {
+      return null
+    }
+    this.callHierarchy = this.callHierarchy ?? CallHierarchyAdapter
+    return this.callHierarchy.getCallHierarchy(server.connection, editor, point, "incoming")
+  }
+
+  protected async getOutgoingCallHierarchy(
+    editor: TextEditor,
+    point: Point
+  ): Promise<atomIde.CallHierarchy<"outgoing"> | null> {
+    const server = await this._serverManager.getServer(editor)
+    if (server === null || !CallHierarchyAdapter.canAdapt(server.capabilities)) {
+      return null
+    }
+    this.callHierarchy = this.callHierarchy ?? CallHierarchyAdapter
+    return this.callHierarchy.getCallHierarchy(server.connection, editor, point, "outgoing")
   }
 
   // Linter push v2 API via LS publishDiagnostics
@@ -879,8 +1006,23 @@ export default class AutoLanguageClient {
       this.getServerAdapter(server, "linterPushV2"),
       editor,
       range,
-      diagnostics
+      diagnostics,
+      this.filterCodeActions.bind(this),
+      this.onApplyCodeActions.bind(this)
     )
+  }
+
+  /** Optionally filter code action before they're displayed */
+  protected filterCodeActions(actions: (ls.Command | ls.CodeAction)[] | null): (ls.Command | ls.CodeAction)[] | null {
+    return actions
+  }
+
+  /**
+   * Optionally handle a code action before default handling. Return `false` to prevent default handling, `true` to
+   * continue with default handling.
+   */
+  protected async onApplyCodeActions(_action: ls.Command | ls.CodeAction): Promise<boolean> {
+    return true
   }
 
   public provideRefactor(): atomIde.RefactorProvider {
@@ -924,6 +1066,7 @@ export default class AutoLanguageClient {
 
   /**
    * `didChangeWatchedFiles` message filtering, override for custom logic.
+   *
    * @param filePath Path of a file that has changed in the project path
    * @returns `false` => message will not be sent to the language server
    */
@@ -932,7 +1075,14 @@ export default class AutoLanguageClient {
   }
 
   /**
+   * If this is set to `true` (the default value), the servers will shut down gracefully. If it is set to `false`, the
+   * servers will be killed without awaiting shutdown response.
+   */
+  protected shutdownGracefully: boolean = true
+
+  /**
    * Called on language server stderr output.
+   *
    * @param stderr A chunk of stderr from a language server instance
    */
   protected handleServerStderr(stderr: string, _projectPath: string): void {

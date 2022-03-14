@@ -6,13 +6,12 @@ import { Logger } from "./logger"
 import { CompositeDisposable, FilesystemChangeEvent, TextEditor } from "atom"
 import { ReportBusyWhile } from "./utils"
 
-type MinimalLanguageServerProcess = Pick<ChildProcess, "stdin" | "stdout" | "stderr" | "pid" | "kill" | "on">
+export type MinimalLanguageServerProcess = Pick<ChildProcess, "stdin" | "stdout" | "stderr" | "pid" | "kill" | "on">
 
 /**
  * Public: Defines a language server process which is either a ChildProcess, or it is a minimal object that resembles a
- * ChildProcess.
- * `MinimalLanguageServerProcess` is used so that language packages with alternative language server process hosting strategies
- * can return something compatible with `AutoLanguageClient.startServerProcess`.
+ * ChildProcess. `MinimalLanguageServerProcess` is used so that language packages with alternative language server
+ * process hosting strategies can return something compatible with `AutoLanguageClient.startServerProcess`.
  */
 export type LanguageServerProcess = ChildProcess | MinimalLanguageServerProcess
 
@@ -23,6 +22,8 @@ export interface ActiveServer {
   process: LanguageServerProcess
   connection: ls.LanguageClientConnection
   capabilities: ls.ServerCapabilities
+  /** Out of project directories that this server can also support. */
+  additionalPaths?: Set<string>
 }
 
 interface RestartCounter {
@@ -30,10 +31,7 @@ interface RestartCounter {
   timerId: NodeJS.Timer
 }
 
-/**
- * Manages the language server lifecycles and their associated objects necessary
- * for adapting them to Atom IDE.
- */
+/** Manages the language server lifecycles and their associated objects necessary for adapting them to Atom IDE. */
 export class ServerManager {
   private _activeServers: ActiveServer[] = []
   private _startingServerPromises: Map<string, Promise<ActiveServer>> = new Map()
@@ -42,6 +40,7 @@ export class ServerManager {
   private _disposable: CompositeDisposable = new CompositeDisposable()
   private _editorToServer: Map<TextEditor, ActiveServer> = new Map()
   private _normalizedProjectPaths: string[] = []
+  private _previousNormalizedProjectPaths: string[] | undefined = undefined // TODO we should not hold a separate cache
   private _isStarted = false
 
   constructor(
@@ -50,7 +49,9 @@ export class ServerManager {
     private _startForEditor: (editor: TextEditor) => boolean,
     private _changeWatchedFileFilter: (filePath: string) => boolean,
     private _reportBusyWhile: ReportBusyWhile,
-    private _languageServerName: string
+    private _languageServerName: string,
+    private _determineProjectPath: (textEditor: TextEditor) => string | null,
+    private shutdownGracefully: boolean
   ) {
     this.updateNormalizedProjectPaths()
   }
@@ -64,6 +65,7 @@ export class ServerManager {
         this._disposable.add(atom.project.onDidChangeFiles(this.projectFilesChanged.bind(this)))
       }
     }
+    this._isStarted = true
   }
 
   public stopListening(): void {
@@ -115,15 +117,15 @@ export class ServerManager {
     }
   }
 
-  public getActiveServers(): ActiveServer[] {
-    return this._activeServers.slice()
+  public getActiveServers(): Readonly<ActiveServer[]> {
+    return this._activeServers
   }
 
   public async getServer(
     textEditor: TextEditor,
     { shouldStart }: { shouldStart?: boolean } = { shouldStart: false }
   ): Promise<ActiveServer | null> {
-    const finalProjectPath = this.determineProjectPath(textEditor)
+    const finalProjectPath = this._determineProjectPath(textEditor)
     if (finalProjectPath == null) {
       // Files not yet saved have no path
       return null
@@ -138,7 +140,8 @@ export class ServerManager {
     if (startingPromise) {
       return startingPromise
     }
-
+    // TODO remove eslint-disable
+    // eslint-disable-next-line no-return-await
     return shouldStart && this._startForEditor(textEditor) ? await this.startServer(finalProjectPath) : null
   }
 
@@ -210,7 +213,7 @@ export class ServerManager {
         this._activeServers.splice(this._activeServers.indexOf(server), 1)
         this._stoppingServers.push(server)
         server.disposable.dispose()
-        if (server.connection.isConnected) {
+        if (this.shutdownGracefully && server.connection.isConnected) {
           await server.connection.shutdown()
         }
 
@@ -246,26 +249,56 @@ export class ServerManager {
     })
   }
 
-  public determineProjectPath(textEditor: TextEditor): string | null {
-    const filePath = textEditor.getPath()
-    if (filePath == null) {
-      return null
-    }
-    return this._normalizedProjectPaths.find((d) => filePath.startsWith(d)) || null
-  }
-
   public updateNormalizedProjectPaths(): void {
-    this._normalizedProjectPaths = atom.project.getDirectories().map((d) => this.normalizePath(d.getPath()))
+    this._normalizedProjectPaths = atom.project.getPaths().map(normalizePath)
   }
 
-  public normalizePath(projectPath: string): string {
-    return !projectPath.endsWith(path.sep) ? path.join(projectPath, path.sep) : projectPath
+  public getNormalizedProjectPaths(): Readonly<string[]> {
+    return this._normalizedProjectPaths
+  }
+
+  /**
+   * Public: fetch the current open list of workspace folders
+   *
+   * @returns A {Promise} containing an {Array} of {lsp.WorkspaceFolder[]} or {null} if only a single file is open in the tool.
+   */
+  public getWorkspaceFolders(): Promise<ls.WorkspaceFolder[] | null> {
+    // NOTE the method must return a Promise based on the specification
+    const projectPaths = this.getNormalizedProjectPaths()
+    if (projectPaths.length === 0) {
+      // only a single file is open
+      return Promise.resolve(null)
+    } else {
+      return Promise.resolve(projectPaths.map(normalizedProjectPathToWorkspaceFolder))
+    }
   }
 
   public async projectPathsChanged(projectPaths: string[]): Promise<void> {
-    const pathsSet = new Set(projectPaths.map(this.normalizePath))
-    const serversToStop = this._activeServers.filter((s) => !pathsSet.has(s.projectPath))
+    const pathsAll = projectPaths.map(normalizePath)
+
+    const previousPaths = this._previousNormalizedProjectPaths ?? this.getNormalizedProjectPaths()
+    const pathsRemoved = previousPaths.filter((projectPath) => !pathsAll.includes(projectPath))
+    const pathsAdded = pathsAll.filter((projectPath) => !previousPaths.includes(projectPath))
+
+    // update cache
+    this._previousNormalizedProjectPaths = pathsAll
+
+    // send didChangeWorkspaceFolders
+    const didChangeWorkspaceFoldersParams = {
+      event: {
+        added: pathsAdded.map(normalizedProjectPathToWorkspaceFolder),
+        removed: pathsRemoved.map(normalizedProjectPathToWorkspaceFolder),
+      },
+    }
+    for (const activeServer of this._activeServers) {
+      activeServer.connection.didChangeWorkspaceFolders(didChangeWorkspaceFoldersParams)
+    }
+
+    // stop the servers that don't have projectPath
+    const serversToStop = this._activeServers.filter((server) => pathsRemoved.includes(server.projectPath))
     await Promise.all(serversToStop.map((s) => this.stopServer(s)))
+
+    // update this._normalizedProjectPaths
     this.updateNormalizedProjectPaths()
   }
 
@@ -292,5 +325,34 @@ export class ServerManager {
         activeServer.connection.didChangeWatchedFiles({ changes })
       }
     }
+  }
+
+  /** @deprecated Use the exported `normalizePath` function */
+  public normalizePath = normalizePath
+}
+
+export function projectPathToWorkspaceFolder(projectPath: string): ls.WorkspaceFolder {
+  const normalizedProjectPath = normalizePath(projectPath)
+  return normalizedProjectPathToWorkspaceFolder(normalizedProjectPath)
+}
+
+export function normalizedProjectPathToWorkspaceFolder(normalizedProjectPath: string): ls.WorkspaceFolder {
+  return {
+    uri: Convert.pathToUri(normalizedProjectPath),
+    name: path.basename(normalizedProjectPath),
+  }
+}
+
+export function normalizePath(projectPath: string): string {
+  return !projectPath.endsWith(path.sep) ? path.join(projectPath, path.sep) : projectPath
+}
+
+/** Considers a path for inclusion in `additionalPaths`. */
+export function considerAdditionalPath(
+  server: ActiveServer & { additionalPaths: Set<string> },
+  additionalPath: string
+): void {
+  if (!additionalPath.startsWith(server.projectPath)) {
+    server.additionalPaths.add(additionalPath)
   }
 }

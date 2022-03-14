@@ -19,14 +19,15 @@ jobs:
           - windows-latest
         atom_channel: [stable, beta]
     steps:
-      - uses: actions/checkout@v2
+      - uses: actions/checkout@v3
       - uses: UziTech/action-setup-atom@v1
         with:
           channel: ${{ matrix.atom_channel }}
       - name: Install APM dependencies
         run: |
           apm install
-      - name: Run tests 👩🏾‍💻
+
+      - name: Run tests
         run: npm run test
 
   Lint:
@@ -35,26 +36,20 @@ jobs:
     env:
       GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     steps:
-      - uses: actions/checkout@v2
+      - uses: actions/checkout@v3
         with:
           fetch-depth: 0
       - name: Commit lint ✨
-        uses: wagoid/commitlint-github-action@v2
-
-      - uses: UziTech/action-setup-atom@v1
-      - name: Setup PNPM
-        uses: pnpm/action-setup@v1.2.1
-        with:
-          version: latest
+        uses: wagoid/commitlint-github-action@v4
 
       - name: Install dependencies
-        run: pnpm install
+        run: npm install
 
       - name: Format ✨
-        run: pnpm test.format
+        run: npm run test.format
 
       - name: Lint ✨
-        run: pnpm test.lint
+        run: npm run test.lint
 
   Release:
     needs: [Test, Lint]
@@ -62,9 +57,9 @@ jobs:
       github.event.repository.fork == false
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v2
+      - uses: actions/checkout@v3
       - uses: UziTech/action-setup-atom@v1
-      - uses: actions/setup-node@v2.1.2
+      - uses: actions/setup-node@v3.0.0
         with:
           node-version: "*"
       - name: NPM install

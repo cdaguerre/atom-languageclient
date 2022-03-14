@@ -2,9 +2,12 @@ import type * as atomIde from "atom-ide-base"
 import * as ls from "./languageclient"
 import { Point, FilesystemChange, Range, TextEditor } from "atom"
 
+// eslint-disable-next-line import/no-deprecated
+import { diagnosticTypeToLSSeverity, atomIdeDiagnosticToLSDiagnostic } from "./adapters/diagnostic-adapter"
+
 /**
- * Public: Class that contains a number of helper methods for general conversions
- * between the language server protocol and Atom/Atom packages.
+ * Public: Class that contains a number of helper methods for general conversions between the language server protocol
+ * and Atom/Atom packages.
  */
 export default class Convert {
   /**
@@ -14,6 +17,9 @@ export default class Convert {
    * @returns The Uri corresponding to the path. e.g. file:///a/b/c.txt
    */
   public static pathToUri(filePath: string): string {
+    if (new URL(filePath, "file://").protocol !== "file:") {
+      return filePath
+    }
     let newPath = filePath.replace(/\\/g, "/")
     if (newPath[0] !== "/") {
       newPath = `/${newPath}`
@@ -25,9 +31,8 @@ export default class Convert {
    * Public: Convert a Uri to a path.
    *
    * @param uri A Uri to convert to a file path.
-   * @returns A file path corresponding to the Uri. e.g. /a/b/c.txt
-   *   If the Uri does not begin file: then it is returned as-is to allow Atom
-   *   to deal with http/https sources in the future.
+   * @returns A file path corresponding to the Uri. e.g. /a/b/c.txt If the Uri does not begin file: then it is returned
+   *   as-is to allow Atom to deal with http/https sources in the future.
    */
   public static uriToPath(uri: string): string {
     const url = new URL(uri, "file://")
@@ -93,8 +98,7 @@ export default class Convert {
    * Public: Create a {TextDocumentIdentifier} from an Atom {TextEditor}.
    *
    * @param editor A {TextEditor} that will be used to form the uri property.
-   * @returns A {TextDocumentIdentifier} that has a `uri` property with the Uri for the
-   *   given editor's path.
+   * @returns A {TextDocumentIdentifier} that has a `uri` property with the Uri for the given editor's path.
    */
   public static editorToTextDocumentIdentifier(editor: TextEditor): ls.TextDocumentIdentifier {
     return { uri: Convert.pathToUri(editor.getPath() || "") }
@@ -104,8 +108,8 @@ export default class Convert {
    * Public: Create a {TextDocumentPositionParams} from a {TextEditor} and optional {Point}.
    *
    * @param editor A {TextEditor} that will be used to form the uri property.
-   * @param point An optional {Point} that will supply the position property. If not specified
-   *   the current cursor position will be used.
+   * @param point An optional {Point} that will supply the position property. If not specified the current cursor
+   *   position will be used.
    * @returns A {TextDocumentPositionParams} that has textDocument property with the editors {TextDocumentIdentifier}
    *   and a position property with the supplied point (or current cursor position when not specified).
    */
@@ -117,13 +121,12 @@ export default class Convert {
   }
 
   /**
-   * Public: Create a string of scopes for the atom text editor using the data-grammar
-   * selector from an {Array} of grammarScope strings.
+   * Public: Create a string of scopes for the atom text editor using the data-grammar selector from an {Array} of
+   * grammarScope strings.
    *
    * @param grammarScopes An {Array} of grammar scope string to convert from.
-   * @returns A single comma-separated list of CSS selectors targetting the grammars of Atom text editors.
-   *   e.g. `['c', 'cpp']` =>
-   *   `'atom-text-editor[data-grammar='c'], atom-text-editor[data-grammar='cpp']`
+   * @returns A single comma-separated list of CSS selectors targetting the grammars of Atom text editors. e.g. `['c',
+   *   'cpp']` => `'atom-text-editor[data-grammar='c'], atom-text-editor[data-grammar='cpp']`
    */
   public static grammarScopesToTextEditorScopes(grammarScopes: string[]): string {
     return grammarScopes
@@ -132,12 +135,11 @@ export default class Convert {
   }
 
   /**
-   * Public: Encode a string so that it can be safely used within a HTML attribute - i.e. replacing all
-   * quoted values with their HTML entity encoded versions.  e.g. `Hello"` becomes `Hello&quot;`
+   * Public: Encode a string so that it can be safely used within a HTML attribute - i.e. replacing all quoted values
+   * with their HTML entity encoded versions. e.g. `Hello"` becomes `Hello&quot;`
    *
    * @param s A string to be encoded.
-   * @returns A string that is HTML attribute encoded by replacing &, <, >, " and ' with their HTML entity
-   *   named equivalents.
+   * @returns A string that is HTML attribute encoded by replacing &, <, >, " and ' with their HTML entity named equivalents.
    */
   public static encodeHTMLAttribute(s: string): string {
     const attributeMap: { [key: string]: string } = {
@@ -151,10 +153,9 @@ export default class Convert {
   }
 
   /**
-   * Public: Convert an Atom File Event as received from atom.project.onDidChangeFiles and convert
-   * it into an Array of Language Server Protocol {FileEvent} objects. Normally this will be a 1-to-1
-   * but renames will be represented by a deletion and a subsequent creation as LSP does not know about
-   * renames.
+   * Public: Convert an Atom File Event as received from atom.project.onDidChangeFiles and convert it into an Array of
+   * Language Server Protocol {FileEvent} objects. Normally this will be a 1-to-1 but renames will be represented by a
+   * deletion and a subsequent creation as LSP does not know about renames.
    *
    * @param fileEvent An {atom$ProjectFileEvent} to be converted.
    * @returns An array of LSP {ls.FileEvent} objects that equivalent conversions to the fileEvent parameter.
@@ -182,44 +183,31 @@ export default class Convert {
     }
   }
 
+  /** @deprecated Use Linter V2 service */
   public static atomIdeDiagnosticToLSDiagnostic(diagnostic: atomIde.Diagnostic): ls.Diagnostic {
-    // TODO: support diagnostic codes and codeDescriptions
-    // TODO!: support data
-    return {
-      range: Convert.atomRangeToLSRange(diagnostic.range),
-      severity: Convert.diagnosticTypeToLSSeverity(diagnostic.type),
-      source: diagnostic.providerName,
-      message: diagnostic.text || "",
-    }
+    // eslint-disable-next-line import/no-deprecated
+    return atomIdeDiagnosticToLSDiagnostic(diagnostic)
   }
 
+  /** @deprecated Use Linter V2 service */
   public static diagnosticTypeToLSSeverity(type: atomIde.DiagnosticType): ls.DiagnosticSeverity {
-    switch (type) {
-      case "Error":
-        return ls.DiagnosticSeverity.Error
-      case "Warning":
-        return ls.DiagnosticSeverity.Warning
-      case "Info":
-        return ls.DiagnosticSeverity.Information
-      default:
-        throw Error(`Unexpected diagnostic type ${type}`)
-    }
+    // eslint-disable-next-line import/no-deprecated
+    return diagnosticTypeToLSSeverity(type)
   }
 
   /**
-   * Public: Convert an array of language server protocol {atomIde.TextEdit} objects to an
-   * equivalent array of Atom {atomIde.TextEdit} objects.
+   * Public: Convert an array of language server protocol {atomIde.TextEdit} objects to an equivalent array of Atom
+   * {atomIde.TextEdit} objects.
    *
    * @param textEdits The language server protocol {atomIde.TextEdit} objects to convert.
    * @returns An {Array} of Atom {atomIde.TextEdit} objects.
    */
-  public static convertLsTextEdits(textEdits: ls.TextEdit[] | null): atomIde.TextEdit[] {
+  public static convertLsTextEdits(textEdits?: ls.TextEdit[] | null): atomIde.TextEdit[] {
     return (textEdits || []).map(Convert.convertLsTextEdit)
   }
 
   /**
-   * Public: Convert a language server protocol {atomIde.TextEdit} object to the
-   * Atom equivalent {atomIde.TextEdit}.
+   * Public: Convert a language server protocol {atomIde.TextEdit} object to the Atom equivalent {atomIde.TextEdit}.
    *
    * @param textEdits The language server protocol {atomIde.TextEdit} objects to convert.
    * @returns An Atom {atomIde.TextEdit} object.

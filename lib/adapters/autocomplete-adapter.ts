@@ -2,7 +2,7 @@ import Convert from "../convert"
 import * as Utils from "../utils"
 import { CancellationTokenSource } from "vscode-jsonrpc"
 import { ActiveServer } from "../server-manager"
-import { filter } from "zadeh"
+import { ObjectArrayFilterer } from "zadeh"
 import {
   CompletionContext,
   CompletionItem,
@@ -17,23 +17,23 @@ import {
   ServerCapabilities,
   TextEdit,
 } from "../languageclient"
+import ApplyEditAdapter from "./apply-edit-adapter"
 import { Point, TextEditor } from "atom"
 import * as ac from "atom/autocomplete-plus"
-import { Suggestion, TextSuggestion, SnippetSuggestion } from "../types/autocomplete-extended"
+import { Suggestion, TextSuggestion, SnippetSuggestion, SuggestionBase } from "../types/autocomplete-extended"
 
 /**
- * Defines the behavior of suggestion acceptance.
- * Assume you have "cons|ole" in the editor (`|` is the cursor position)
+ * Defines the behavior of suggestion acceptance. Assume you have "cons|ole" in the editor ( `|` is the cursor position)
  * and the autocomplete suggestion is `const`.
- * - if `false` -> the edits are inserted : const|ole
- * - if `true`` -> the edits are replaced: const|
+ *
+ * - If `false` -> the edits are inserted : const|ole
+ * - If `true`` -> the edits are replaced: const|
  */
 type ShouldReplace = boolean
 
 /**
- * Holds a list of suggestions generated from the CompletionItem[]
- * list sent by the server, as well as metadata about the context
- * it was collected in
+ * Holds a list of suggestions generated from the CompletionItem[] list sent by the server, as well as metadata about
+ * the context it was collected in
  */
 interface SuggestionCacheEntry {
   /** If `true`, the server will send a list of suggestions to replace this one */
@@ -57,10 +57,7 @@ class PossiblyResolvedCompletionItem {
   constructor(public completionItem: CompletionItem, public isResolved: boolean) {}
 }
 
-/**
- * Public: Adapts the language server protocol "textDocument/completion" to the Atom
- * AutoComplete+ package.
- */
+/** Public: Adapts the language server protocol "textDocument/completion" to the Atom AutoComplete+ package. */
 export default class AutocompleteAdapter {
   public static canAdapt(serverCapabilities: ServerCapabilities): boolean {
     return serverCapabilities.completionProvider != null
@@ -76,17 +73,14 @@ export default class AutocompleteAdapter {
   private _cancellationTokens: WeakMap<LanguageClientConnection, CancellationTokenSource> = new WeakMap()
 
   /**
-   * Public: Obtain suggestion list for AutoComplete+ by querying the language server using
-   * the `textDocument/completion` request.
+   * Public: Obtain suggestion list for AutoComplete+ by querying the language server using the `textDocument/completion` request.
    *
    * @param server An {ActiveServer} pointing to the language server to query.
    * @param request The {atom$AutocompleteRequest} to satisfy.
-   * @param onDidConvertCompletionItem An optional function that takes a {CompletionItem},
-   *   an {atom$AutocompleteSuggestion} and a {atom$AutocompleteRequest}
-   *   allowing you to adjust converted items.
+   * @param onDidConvertCompletionItem An optional function that takes a {CompletionItem}, an
+   *   {atom$AutocompleteSuggestion} and a {atom$AutocompleteRequest} allowing you to adjust converted items.
    * @param shouldReplace The behavior of suggestion acceptance (see {ShouldReplace}).
-   * @returns A {Promise} of an {Array} of {atom$AutocompleteSuggestion}s containing the
-   *   AutoComplete+ suggestions to display.
+   * @returns A {Promise} of an {Array} of {atom$AutocompleteSuggestion}s containing the AutoComplete+ suggestions to display.
    */
   public async getSuggestions(
     server: ActiveServer,
@@ -140,7 +134,17 @@ export default class AutocompleteAdapter {
     }
 
     const filtered = !(request.prefix === "" || (triggerChar !== "" && triggerOnly))
-    return filtered ? filter(suggestions, request.prefix, { key: "filterText" }) : suggestions
+    if (filtered) {
+      // filter the suggestions who have `filterText` property
+      const validSuggestions = suggestions.filter((sgs) => typeof sgs.filterText === "string") as Suggestion[] &
+        { filterText: string }[]
+      // TODO use `ObjectArrayFilterer.setCandidate` in `_suggestionCache` to avoid creating `ObjectArrayFilterer` every time from scratch
+      const objFilterer = new ObjectArrayFilterer(validSuggestions, "filterText")
+      // zadeh returns an array of the selected `Suggestions`
+      return objFilterer.filter(request.prefix) as any as Suggestion[]
+    } else {
+      return suggestions
+    }
   }
 
   private shouldTrigger(request: ac.SuggestionsRequestedEvent, triggerChar: string, minWordLength: number): boolean {
@@ -191,7 +195,7 @@ export default class AutocompleteAdapter {
     const triggerColumns: [number, number] = [triggerPoint.column, request.bufferPosition.column]
 
     // Setup the cache for subsequent filtered results
-    const isComplete = completions === null || Array.isArray(completions) || completions.isIncomplete === false
+    const isComplete = completions === null || Array.isArray(completions) || !completions.isIncomplete
     const suggestionMap = this.completionItemsToSuggestions(
       completions,
       request,
@@ -211,8 +215,8 @@ export default class AutocompleteAdapter {
   }
 
   /**
-   * Public: Obtain a complete version of a suggestion with additional information
-   * the language server can provide by way of the `completionItem/resolve` request.
+   * Public: Obtain a complete version of a suggestion with additional information the language server can provide by
+   * way of the `completionItem/resolve` request.
    *
    * @param server An {ActiveServer} pointing to the language server to query.
    * @param suggestion An {atom$AutocompleteSuggestion} suggestion that should be resolved.
@@ -230,7 +234,7 @@ export default class AutocompleteAdapter {
     const cache = this._suggestionCache.get(server)
     if (cache) {
       const possiblyResolvedCompletionItem = cache.suggestionMap.get(suggestion)
-      if (possiblyResolvedCompletionItem != null && possiblyResolvedCompletionItem.isResolved === false) {
+      if (possiblyResolvedCompletionItem != null && !possiblyResolvedCompletionItem.isResolved) {
         const resolvedCompletionItem = await server.connection.completionItemResolve(
           possiblyResolvedCompletionItem.completionItem
         )
@@ -257,16 +261,15 @@ export default class AutocompleteAdapter {
   }
 
   /**
-   * Public: Get the trigger character that caused the autocomplete (if any).  This is required because
-   * AutoComplete-plus does not have trigger characters.  Although the terminology is 'character' we treat
-   * them as variable length strings as this will almost certainly change in the future to support '->' etc.
+   * Public: Get the trigger character that caused the autocomplete (if any). This is required because AutoComplete-plus
+   * does not have trigger characters. Although the terminology is 'character' we treat them as variable length strings
+   * as this will almost certainly change in the future to support '->' etc.
    *
    * @param request An {Array} of {atom$AutocompleteSuggestion}s to locate the prefix, editor, bufferPosition etc.
    * @param triggerChars The {Array} of {string}s that can be trigger characters.
-   * @returns A [{string}, boolean] where the string is the matching trigger character or an empty string
-   *   if one was not matched, and the boolean is true if the trigger character is in request.prefix, and false
-   *   if it is in the word before request.prefix. The boolean return value has no meaning if the string return
-   *   value is an empty string.
+   * @returns A [{string}, boolean] where the string is the matching trigger character or an empty string if one was not
+   *   matched, and the boolean is true if the trigger character is in request.prefix, and false if it is in the word
+   *   before request.prefix. The boolean return value has no meaning if the string return value is an empty string.
    */
   public static getTriggerCharacter(request: ac.SuggestionsRequestedEvent, triggerChars: string[]): [string, boolean] {
     // AutoComplete-Plus considers text after a symbol to be a new trigger. So we should look backward
@@ -294,8 +297,8 @@ export default class AutocompleteAdapter {
   }
 
   /**
-   * Public: Create TextDocumentPositionParams to be sent to the language server
-   * based on the editor and position from the AutoCompleteRequest.
+   * Public: Create TextDocumentPositionParams to be sent to the language server based on the editor and position from
+   * the AutoCompleteRequest.
    *
    * @param request The {atom$AutocompleteRequest} to obtain the editor from.
    * @param triggerPoint The {atom$Point} where the trigger started.
@@ -306,16 +309,17 @@ export default class AutocompleteAdapter {
   }
 
   /**
-   * Public: Create {CompletionParams} to be sent to the language server
-   * based on the editor and position from the Autocomplete request etc.
+   * Public: Create {CompletionParams} to be sent to the language server based on the editor and position from the
+   * Autocomplete request etc.
    *
    * @param request The {atom$AutocompleteRequest} containing the request details.
    * @param triggerCharacter The {string} containing the trigger character (empty if none).
    * @param triggerOnly A {boolean} representing whether this completion is triggered right after a trigger character.
    * @returns A {CompletionParams} with the keys:
-   *   * `textDocument` the language server protocol textDocument identification.
-   *   * `position` the position within the text document to display completion request for.
-   *   * `context` containing the trigger character and kind.
+   *
+   *   - `textDocument` the language server protocol textDocument identification.
+   *   - `position` the position within the text document to display completion request for.
+   *   - `context` containing the trigger character and kind.
    */
   public static createCompletionParams(
     request: ac.SuggestionsRequestedEvent,
@@ -330,13 +334,11 @@ export default class AutocompleteAdapter {
   }
 
   /**
-   * Public: Create {CompletionContext} to be sent to the language server
-   * based on the trigger character.
+   * Public: Create {CompletionContext} to be sent to the language server based on the trigger character.
    *
    * @param triggerCharacter The {string} containing the trigger character or '' if none.
    * @param triggerOnly A {boolean} representing whether this completion is triggered right after a trigger character.
-   * @returns An {CompletionContext} that specifies the triggerKind and the triggerCharacter
-   *   if there is one.
+   * @returns An {CompletionContext} that specifies the triggerKind and the triggerCharacter if there is one.
    */
   public static createCompletionContext(triggerCharacter: string, triggerOnly: boolean): CompletionContext {
     if (triggerCharacter === "") {
@@ -349,15 +351,15 @@ export default class AutocompleteAdapter {
   }
 
   /**
-   * Public: Convert a language server protocol CompletionItem array or CompletionList to
-   * an array of ordered AutoComplete+ suggestions.
+   * Public: Convert a language server protocol CompletionItem array or CompletionList to an array of ordered
+   * AutoComplete+ suggestions.
    *
-   * @param completionItems An {Array} of {CompletionItem} objects or a {CompletionList} containing completion
-   *   items to be converted.
+   * @param completionItems An {Array} of {CompletionItem} objects or a {CompletionList} containing completion items to
+   *   be converted.
    * @param request The {atom$AutocompleteRequest} to satisfy.
    * @param shouldReplace The behavior of suggestion acceptance (see {ShouldReplace}).
-   * @param onDidConvertCompletionItem A function that takes a {CompletionItem}, an {atom$AutocompleteSuggestion}
-   *   and a {atom$AutocompleteRequest} allowing you to adjust converted items.
+   * @param onDidConvertCompletionItem A function that takes a {CompletionItem}, an {atom$AutocompleteSuggestion} and a
+   *   {atom$AutocompleteRequest} allowing you to adjust converted items.
    * @returns A {Map} of AutoComplete+ suggestions ordered by the CompletionItems sortText.
    */
   public completionItemsToSuggestions(
@@ -394,8 +396,8 @@ export default class AutocompleteAdapter {
    * @param suggestion A {atom$AutocompleteSuggestion} to have the conversion applied to.
    * @param request The {atom$AutocompleteRequest} to satisfy.
    * @param shouldReplace The behavior of suggestion acceptance (see {ShouldReplace}).
-   * @param onDidConvertCompletionItem A function that takes a {CompletionItem}, an {atom$AutocompleteSuggestion}
-   *   and a {atom$AutocompleteRequest} allowing you to adjust converted items.
+   * @param onDidConvertCompletionItem A function that takes a {CompletionItem}, an {atom$AutocompleteSuggestion} and a
+   *   {atom$AutocompleteRequest} allowing you to adjust converted items.
    * @returns The {atom$AutocompleteSuggestion} passed in as suggestion with the conversion applied.
    */
   public static completionItemToSuggestion(
@@ -436,6 +438,7 @@ export default class AutocompleteAdapter {
     suggestion.displayText = item.label
     suggestion.type = AutocompleteAdapter.completionKindToSuggestionType(item.kind)
     AutocompleteAdapter.applyDetailsToSuggestion(item, suggestion)
+    suggestion.completionItem = item
   }
 
   public static applyDetailsToSuggestion(item: CompletionItem, suggestion: Suggestion): void {
@@ -458,8 +461,8 @@ export default class AutocompleteAdapter {
   }
 
   /**
-   * Public: Applies the textEdit part of a language server protocol CompletionItem to an
-   * AutoComplete+ Suggestion via the replacementPrefix and text properties.
+   * Public: Applies the textEdit part of a language server protocol CompletionItem to an AutoComplete+ Suggestion via
+   * the replacementPrefix and text properties.
    *
    * @param textEdit A {TextEdit} from a CompletionItem to apply.
    * @param editor An Atom {TextEditor} used to obtain the necessary text replacement.
@@ -494,25 +497,41 @@ export default class AutocompleteAdapter {
   }
 
   /**
-   * Public: Adds a snippet to the suggestion if the CompletionItem contains
-   * snippet-formatted text
+   * Handle additional text edits after a suggestion insert, e.g. `additionalTextEdits`.
+   *
+   * `additionalTextEdits` are An optional array of additional text edits that are applied when selecting this
+   * completion. Edits must not overlap (including the same insert position) with the main edit nor with themselves.
+   *
+   * Additional text edits should be used to change text unrelated to the current cursor position (for example adding an
+   * import statement at the top of the file if the completion item will insert an unqualified type).
+   */
+  public static applyAdditionalTextEdits(event: ac.SuggestionInsertedEvent): void {
+    const suggestion = event.suggestion as SuggestionBase
+    const additionalEdits = suggestion.completionItem?.additionalTextEdits
+    const buffer = event.editor.getBuffer()
+
+    ApplyEditAdapter.applyEdits(buffer, Convert.convertLsTextEdits(additionalEdits))
+    buffer.groupLastChanges()
+  }
+
+  /**
+   * Public: Adds a snippet to the suggestion if the CompletionItem contains snippet-formatted text
    *
    * @param item An {CompletionItem} containing the completion items to be merged into.
    * @param suggestion The {atom$AutocompleteSuggestion} to merge the conversion into.
    */
   public static applySnippetToSuggestion(item: CompletionItem, suggestion: SnippetSuggestion): void {
     if (item.insertTextFormat === InsertTextFormat.Snippet) {
-      suggestion.snippet = item.textEdit != null ? item.textEdit.newText : item.insertText || ""
+      suggestion.snippet = item.textEdit != null ? item.textEdit.newText : item.insertText || item.label
     }
   }
 
   /**
-   * Public: Obtain the textual suggestion type required by AutoComplete+ that
-   * most closely maps to the numeric completion kind supplies by the language server.
+   * Public: Obtain the textual suggestion type required by AutoComplete+ that most closely maps to the numeric
+   * completion kind supplies by the language server.
    *
    * @param kind A {Number} that represents the suggestion kind to be converted.
-   * @returns A {String} containing the AutoComplete+ suggestion type equivalent
-   *   to the given completion kind.
+   * @returns A {String} containing the AutoComplete+ suggestion type equivalent to the given completion kind.
    */
   public static completionKindToSuggestionType(kind: number | undefined): string {
     switch (kind) {
@@ -560,10 +579,11 @@ export default class AutocompleteAdapter {
 }
 
 /**
- * Normalizes the given grammar scope for autoComplete package so it always starts with `.`
- * Based on https://github.com/atom/autocomplete-plus/wiki/Autocomplete-Providers
- * @param grammarScope such as 'source.python' or '.source.python'
- * @returns the normalized grammarScope such as `.source.python`
+ * Normalizes the given grammar scope for autoComplete package so it always starts with `.` Based on
+ * https://github.com/atom/autocomplete-plus/wiki/Autocomplete-Providers
+ *
+ * @param grammarScope Such as 'source.python' or '.source.python'
+ * @returns The normalized grammarScope such as `.source.python`
  */
 export function grammarScopeToAutoCompleteSelector(grammarScope: string): string {
   return grammarScope.includes(".") && grammarScope[0] !== "." ? `.${grammarScope}` : grammarScope
